@@ -1,0 +1,387 @@
+---
+title: "ONET Brown Tasks"
+author: "Alperen Ahmet Kocsoy"
+date: "2026-10-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# NOTES
+
+
+# Pre-processing
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(writexl)
+library(tidytext)
+
+brown_occupations <- read_excel("C:/Users/alpko/OneDrive/Belgeler/Green Brown/Dictionaries/onet_brown_occupations.xlsx")
+task_statements <- read_excel("C:/Users/alpko/OneDrive/Belgeler/Green Brown/Dictionaries/onet2020_task_statements.xlsx")
+
+# Standardization
+brown_tasks <- brown_occupations %>%
+  mutate(
+    soc_code_clean = str_trim(as.character(`O*NET-SOC Code`))
+  )
+
+task_statements <- task_statements %>%
+  mutate(
+    soc_code_clean = str_trim(as.character(`O*NET-SOC Code`)),
+    soc_code_clean = str_remove(soc_code_clean, "\\.\\d+$")
+  )
+
+# Selecting brown tasks
+brown_task_statements_full <- task_statements %>%
+  semi_join(
+    brown_tasks %>% distinct(soc_code_clean),
+    by = "soc_code_clean"
+  ) %>%
+  select(-soc_code_clean)
+
+nrow(brown_task_statements_full)
+head(brown_task_statements_full)
+n_distinct(brown_task_statements_full$`O*NET-SOC Code`) # 88, Vona et al. (2018)
+
+write_xlsx(
+  brown_task_statements_full,
+  "brown_task_statements_full_rows.xlsx"
+)
+```
+There are 85 unique broad occupations, but 88 occupations if the more detailed occupations are also included (n = 4). I choose to include them as well. 
+
+# Frequency Analysis
+```{r}
+# Loading task descriptions for brown occupations
+brown_task_statements <- read_excel(
+  "brown_task_statements_full_rows.xlsx"
+)
+
+# Counting individual words in the task statements
+word_frequencies <- brown_task_statements %>%
+  filter(!is.na(Task)) %>%
+  select(Task) %>%
+  unnest_tokens(word, Task) %>%
+  anti_join(stop_words, by = "word") %>%
+  filter(str_detect(word, "[a-z]")) %>%
+  count(word, sort = TRUE)
+
+# Displaying the 300 most frequent words
+top_300_words <- word_frequencies %>%
+  slice_max(order_by = n, n = 300, with_ties = FALSE)
+
+print(top_300_words, n = 300)
+
+# Plotting the 20 most frequent words
+top_20_words <- word_frequencies %>%
+  slice_max(order_by = n, n = 20, with_ties = FALSE)
+
+ggplot2::ggplot(
+  top_20_words,
+  ggplot2::aes(x = reorder(word, n), y = n)
+) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Most Frequent Words in Brown-Occupation Task Statements",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  ggplot2::theme_minimal()
+
+# Exporting all word frequencies to Excel
+write_xlsx(
+  word_frequencies,
+  "brown_task_word_frequencies.xlsx"
+)
+```
+Because the vast majority of these words are not meaningful by themselves and may express very common tasks in brown and non-brown jobs, I decided to conduct distinctive words analysis, which provides words that are most commonly found in the task descriptions of the brown jobs. To reiterate, these brown jobs are those that were identified by Vona et al. (2018)
+
+# Distinctive Words (Unigram) Analysis
+```{r}
+library(tidyr)
+library(ggplot2)
+
+# Identifying brown and non-brown occupations
+brown_codes <- brown_occupations %>%
+  mutate(
+    soc_code_clean = str_remove(
+      str_trim(as.character(`O*NET-SOC Code`)),
+      "\\.\\d+$"
+    )
+  ) %>%
+  distinct(soc_code_clean)
+
+all_tasks <- task_statements %>%
+  mutate(
+    task_id = row_number(),
+    soc_code_clean = str_remove(
+      str_trim(as.character(`O*NET-SOC Code`)),
+      "\\.\\d+$"
+    ),
+    group = if_else(
+      soc_code_clean %in% brown_codes$soc_code_clean,
+      "brown",
+      "other"
+    )
+  ) %>%
+  filter(!is.na(Task), str_trim(Task) != "")
+
+# Checking the size of each group
+all_tasks %>%
+  group_by(group) %>%
+  summarise(
+    n_occupations = n_distinct(soc_code_clean),
+    n_task_statements = n(),
+    .groups = "drop"
+  )
+
+# Tokenizing all task statements
+task_words <- all_tasks %>%
+  select(task_id, group, Task) %>%
+  unnest_tokens(word, Task) %>%
+  anti_join(stop_words, by = "word") %>%
+  filter(str_detect(word, "[a-z]"))
+
+# Counting each word only once per task statement
+task_word_presence <- task_words %>%
+  distinct(task_id, group, word)
+
+word_counts <- task_word_presence %>%
+  count(group, word, name = "tasks_with_word") %>%
+  pivot_wider(
+    names_from = group,
+    values_from = tasks_with_word,
+    values_fill = 0
+  )
+
+# Calculating the proportion of task statements containing each word
+brown_total <- sum(all_tasks$group == "brown")
+other_total <- sum(all_tasks$group == "other")
+
+distinctive_words <- word_counts %>%
+  mutate(
+    brown_prevalence = brown / brown_total,
+    other_prevalence = other / other_total,
+    difference = brown_prevalence - other_prevalence,
+    prevalence_ratio = if_else(
+      other_prevalence > 0,
+      brown_prevalence / other_prevalence,
+      NA_real_
+    )
+  ) %>%
+  arrange(desc(difference))
+
+# Displaying the 300 most distinctive words
+top_300_distinctive <- distinctive_words %>%
+  filter(brown >= 5) %>% # excluding bigrams appearing less than 5
+  slice_max(
+    order_by = difference,
+    n = 300,
+    with_ties = FALSE
+  ) %>%
+  select(
+    word,
+    brown,
+    other,
+    brown_prevalence,
+    other_prevalence,
+    difference,
+    prevalence_ratio
+  )
+
+print(top_300_distinctive, n = 300)
+
+# Plotting the 20 most distinctive words
+top_20_distinctive <- distinctive_words %>%
+  filter(brown >= 5) %>% 
+  slice_max(
+    order_by = difference,
+    n = 20,
+    with_ties = FALSE
+  )
+
+ggplot(
+  top_20_distinctive,
+  aes(x = reorder(word, difference), y = difference)
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Words Most Distinctive of Brown Occupations",
+    x = "Word",
+    y = "Difference in task-statement prevalence"
+  ) +
+  theme_minimal()
+
+# Exporting the results
+write_xlsx(
+  list(
+    All_words = distinctive_words,
+    Top_300_distinctive = top_300_distinctive
+  ),
+  "brown_distinctive_word_analysis.xlsx"
+)
+```
+Above, I identify the top 300 most distinctive words in brown task descriptions. They are identified by selecting the words that have the most prevalence differences. For each word, brown prevalence is calculated by dividing the number of brown task descriptions that include the word by the number of all brown task statements (n = 1661). Non-brown (other) prevalence is similarly calculated by dividing number of non-brown task descriptions that include the word by the number of all non-brown task statements. Then, the difference in prevalence becomes brown prevalence minus non-brown prevalence, which I multiply by 100 to express it in percentage points. The top 300 most distinctive words in brown task descriptions is found by ranking words according to this difference calculation. The positively larger the difference, the higher the keyword is ranked.
+
+However, it is not very reliable to extract dictionary keywords from this list, either. Nevertheless, in the following chunk, I decided to try finding more dictionary terms by identifying the most commonly found two-word (bigram) and three-word (trigram) phrases in the task statements of brown jobs. 
+
+# Distinctive N-gram Analysis
+```{r}
+# Tokenization and removing stopwords
+clean_task_words <- all_tasks %>%
+  select(task_id, group, Task) %>%
+  unnest_tokens(word, Task) %>%
+  anti_join(stop_words, by = "word") %>%
+  filter(str_detect(word, "[a-z]"))
+
+# Reconstructing the cleaned text for each task statement
+clean_tasks <- clean_task_words %>%
+  group_by(task_id, group) %>%
+  summarise(
+    Task_clean = paste(word, collapse = " "),
+    .groups = "drop"
+  )
+
+# Keeping the original task counts as denominators
+brown_total <- sum(all_tasks$group == "brown")
+other_total <- sum(all_tasks$group == "other")
+
+# Bigrams
+bigram_presence <- clean_tasks %>%
+  unnest_tokens(
+    bigram,
+    Task_clean,
+    token = "ngrams",
+    n = 2
+  ) %>%
+  filter(!is.na(bigram)) %>%
+  distinct(task_id, group, bigram)
+
+bigram_counts <- bigram_presence %>%
+  count(group, bigram, name = "tasks_with_phrase") %>%
+  pivot_wider(
+    names_from = group,
+    values_from = tasks_with_phrase,
+    values_fill = 0
+  )
+
+bigram_distinctive <- bigram_counts %>%
+  mutate(
+    brown_prevalence = brown / brown_total,
+    other_prevalence = other / other_total,
+    difference_pp = (brown_prevalence - other_prevalence) * 100,
+    prevalence_ratio = if_else(
+      other_prevalence > 0,
+      brown_prevalence / other_prevalence,
+      NA_real_
+    )
+  ) %>%
+  arrange(desc(difference_pp))
+
+top_300_bigrams <- bigram_distinctive %>%
+  filter(brown >= 5) %>% 
+  slice_max(
+    order_by = difference_pp,
+    n = 300,
+    with_ties = FALSE
+  )
+
+print(top_300_bigrams, n = 300)
+
+# Trigrams
+trigram_presence <- clean_tasks %>%
+  unnest_tokens(
+    trigram,
+    Task_clean,
+    token = "ngrams",
+    n = 3
+  ) %>%
+  filter(!is.na(trigram)) %>%
+  distinct(task_id, group, trigram)
+
+trigram_counts <- trigram_presence %>%
+  count(group, trigram, name = "tasks_with_phrase") %>%
+  pivot_wider(
+    names_from = group,
+    values_from = tasks_with_phrase,
+    values_fill = 0
+  )
+
+trigram_distinctive <- trigram_counts %>%
+  mutate(
+    brown_prevalence = brown / brown_total,
+    other_prevalence = other / other_total,
+    difference_pp = (brown_prevalence - other_prevalence) * 100,
+    prevalence_ratio = if_else(
+      other_prevalence > 0,
+      brown_prevalence / other_prevalence,
+      NA_real_
+    )
+  ) %>%
+  arrange(desc(difference_pp))
+
+top_300_trigrams <- trigram_distinctive %>%
+  filter(brown >= 5) %>%
+  slice_max(
+    order_by = difference_pp,
+    n = 300,
+    with_ties = FALSE
+  )
+
+print(top_300_trigrams, n = 300)
+
+# Plotting the 20 most distinctive bigrams
+top_20_bigrams <- bigram_distinctive %>%
+  filter(brown >= 5) %>%
+  slice_max(order_by = difference_pp, n = 20, with_ties = FALSE)
+
+ggplot(
+  top_20_bigrams,
+  aes(x = reorder(bigram, difference_pp), y = difference_pp)
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Most Distinctive Two-Word Phrases",
+    x = "Bigram",
+    y = "Prevalence difference (percentage points)"
+  ) +
+  theme_minimal()
+
+# Plotting the 20 most distinctive trigrams
+top_20_trigrams <- trigram_distinctive %>%
+  filter(brown >= 5) %>%
+  slice_max(order_by = difference_pp, n = 20, with_ties = FALSE)
+
+ggplot(
+  top_20_trigrams,
+  aes(x = reorder(trigram, difference_pp), y = difference_pp)
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Most Distinctive Three-Word Phrases",
+    x = "Trigram",
+    y = "Prevalence difference (percentage points)"
+  ) +
+  theme_minimal()
+
+# Exporting results to Excel
+write_xlsx(
+  list(
+    Bigrams_all = bigram_distinctive,
+    Bigrams_top300 = top_300_bigrams,
+    Trigrams_all = trigram_distinctive,
+    Trigrams_top300 = top_300_trigrams
+  ),
+  "brown_tasks_ngram.xlsx"
+)
+
+```
+I followed the same logic I applied to the Distinctive Words (Unigrams) Analysis section. This was also not very helpful, especially for trigrams. I could not derive enough number of phrases to complete my dictionary. I now decided to manually look at the task statements of every brown occupation of the ONET 25.1 (2020) data. 
